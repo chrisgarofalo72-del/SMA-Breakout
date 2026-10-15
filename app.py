@@ -254,3 +254,4 @@ if "results" in st.session_state:
         st.caption("Analyst consensus and targets are third-party estimates, not guarantees. Upside = (mean target / latest scanned close − 1) × 100. Missing estimates are blank. This scanner is informational, not investment advice.")
 else:
     st.info("Choose your filters on the left, then click **Scan stocks now**. No account or premium TradingView subscription required.")
+
