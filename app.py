@@ -181,7 +181,135 @@ if scan:
             tickers = list(dict.fromkeys(filter(None, (clean_symbol(s) for s in re.split(r"[\s,;]+", custom)))))
         elif universe == "All U.S.-listed (slow)":
             tickers = get_us_listings()[:limit]
-            st.info(f"Scanning the first {len(tickers):,} alphabetically sorted eligible symbols. Raise the maximum ticker count to broaden coverage. This is not the entire market unless the cap reaches the listing size.")
+            st.info(f"Scanning the first {len(tickers):,} alphabetically sorted eligible symbols. Raise the maximum ticker count to broaden coverage. This is not the entire market unless the cap reaches the li        if target is None:
+            details.append("No consensus price target returned")
+    except Exception as exc:
+        details.append(f"Price-target request: {type(exc).__name__}: {str(exc)[:100]}")
+
+    try:
+        summary = t.get_recommendations_summary()
+        if isinstance(summary, pd.DataFrame) and not summary.empty:
+            row = summary.iloc[0]
+            # yfinance periods usually order as '0m', '-1m', etc.
+            if "period" in summary.columns:
+                current = summary.loc[summary["period"].astype(str) == "0m"]
+                if not current.empty:
+                    row = current.iloc[0]
+            names = ["strongBuy", "buy", "hold", "sell", "strongSell"]
+            counts = [int(number(row.get(k)) or 0) for k in names]
+            analyst_count = sum(counts)
+            if analyst_count > 0:
+                weighted = sum((i + 1) * c for i, c in enumerate(counts)) / analyst_count
+                rating = rating_from_mean(weighted)
+        if rating is None:
+            details.append("No current analyst recommendation counts returned")
+    except Exception as exc:
+        details.append(f"Ratings request: {type(exc).__name__}: {str(exc)[:100]}")
+
+    # Additional info keys sometimes fill gaps when analyst endpoints have missing fields.
+    if target is None or rating is None or analyst_count is None:
+        try:
+            info = t.get_info() or {}
+            if target is None:
+                target = number(info.get("targetMeanPrice"))
+            if rating is None:
+                rating = rating_from_mean(info.get("recommendationMean"))
+            if analyst_count is None:
+                analyst_count = number(info.get("numberOfAnalystOpinions"))
+        except Exception as exc:
+            details.append(f"Ticker info request: {type(exc).__name__}: {str(exc)[:100]}")
+    return target, rating or "N/A", analyst_count, "; ".join(details) or "Available"
+
+
+st.sidebar.header("Screen settings")
+ticker_text = st.sidebar.text_area("Ticker symbols (comma, space or newline separated)", DEFAULT, height=160)
+lookback = st.sidebar.slider("Breakout window (trading days)", 1, 30, 5)
+slope_days = st.sidebar.slider("Rising SMA lookback (trading days)", 1, 30, 5)
+require_rising = st.sidebar.checkbox("Require rising 150-day SMA", value=True)
+require_above = st.sidebar.checkbox("Require price still above SMA", value=True)
+show_all = st.sidebar.checkbox("Show all tickers (diagnostic)", value=False)
+run = st.sidebar.button("Run scan", type="primary")
+
+st.info("Analyst data is supplemental. Free Yahoo data can be unavailable or rate-limited for some tickers. N/A means unavailable, not a Hold rating or zero target.")
+
+with st.expander("Test analyst data for one ticker", expanded=True):
+    test_symbol = st.text_input("Ticker to test", value="NVDA", key="test_symbol").strip().upper()
+    if st.button("Test Analyst Data"):
+        with st.spinner(f"Checking Yahoo analyst endpoints for {test_symbol}..."):
+            try:
+                target, rating, count, note = analyst_data(test_symbol)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Consensus target", dollars(target))
+                c2.metric("Consensus rating", rating)
+                c3.metric("Analysts", str(int(count)) if number(count) is not None else "N/A")
+                st.caption(f"Data diagnostics: {note}")
+            except Exception as exc:
+                st.error(f"Analyst data lookup failed: {type(exc).__name__}: {exc}")
+
+if run:
+    symbols = list(dict.fromkeys(t.upper().strip() for t in ticker_text.replace(",", " ").split() if t.strip()))
+    if not symbols:
+        st.warning("Enter at least one ticker.")
+    elif len(symbols) > 100:
+        st.error("Use 100 tickers or fewer per scan to reduce rate limits.")
+    else:
+        rows = []
+        errors = []
+        progress = st.progress(0, text="Checking price history...")
+        for i, sym in enumerate(symbols):
+            try:
+                df = history(sym)
+                if len(df) < 160:
+                    errors.append(f"{sym}: insufficient price history")
+                    continue
+                close = df["Close"].astype(float)
+                sma = close.rolling(150).mean()
+                cross = (close > sma) & (close.shift(1) <= sma.shift(1))
+                positions = [j for j in range(max(1, len(df) - lookback), len(df)) if bool(cross.iloc[j])]
+                recent = bool(positions)
+                latest = positions[-1] if recent else None
+                sma_now = number(sma.iloc[-1])
+                price = number(close.iloc[-1])
+                rising = sma_now is not None and number(sma.iloc[-1 - slope_days]) is not None and sma_now > float(sma.iloc[-1 - slope_days])
+                above = price is not None and sma_now is not None and price > sma_now
+                qualified = recent and (rising or not require_rising) and (above or not require_above)
+                if not (qualified or show_all):
+                    continue
+                row = {
+                    "Ticker": sym,
+                    "Close": price,
+                    "150 SMA": sma_now,
+                    "Breakout date": str(df.index[latest].date()) if latest is not None else "—",
+                    "Still above": "Yes" if above else "No",
+                    "Rising SMA": "Yes" if rising else "No",
+                    "Qualifies": "Yes" if qualified else "No",
+                }
+                rows.append(row)
+            except Exception as exc:
+                errors.append(f"{sym}: {type(exc).__name__}: {str(exc)[:100]}")
+            finally:
+                progress.progress((i + 1) / len(symbols), text=f"Checking prices ({i + 1}/{len(symbols)})")
+        progress.empty()
+        if not rows:
+            st.warning("No qualifying breakouts in this ticker list. Try a longer lookback or 'Show all tickers' to diagnose.")
+        else:
+            st.write(f"**{sum(r['Qualifies']=='Yes' for r in rows)}** qualifying breakout(s) from **{len(symbols)}** checked ticker(s).")
+            analyst_progress = st.progress(0, text="Retrieving analyst data...")
+            for i, row in enumerate(rows):
+                target, rating, count, note = analyst_data(row["Ticker"])
+                row["Analyst rating"] = rating
+                row["Analysts"] = int(count) if number(count) is not None else None
+                row["Target"] = target
+                row["Target upside %"] = round((target / row["Close"] - 1) * 100, 1) if target is not None and row["Close"] else None
+                row["Analyst data notes"] = note
+                analyst_progress.progress((i + 1) / len(rows), text=f"Analyst data ({i + 1}/{len(rows)})")
+            analyst_progress.empty()
+            out = pd.DataFrame(rows)
+            st.dataframe(out, use_container_width=True, hide_index=True)
+            st.download_button("Download CSV", out.to_csv(index=False).encode(), "sma150_breakouts.csv", "text/csv")
+        if errors:
+            with st.expander(f"Price-data warnings ({len(errors)})"):
+sting size.")
         else:
             tickers = get_index_members(universe)[:limit]
         if not tickers:
