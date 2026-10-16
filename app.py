@@ -181,7 +181,10 @@ if scan:
             tickers = list(dict.fromkeys(filter(None, (clean_symbol(s) for s in re.split(r"[\s,;]+", custom)))))
         elif universe == "All U.S.-listed (slow)":
             tickers = get_us_listings()[:limit]
-            st.info(f"Scanning the first {len(tickers):,} alphabetically sorted eligible symbols. Raise the maximum ticker count to broaden coverage. This is not the entire market unless the cap reaches the li        if target is None:
+            st.info(
+    f"Scanning the first {len(tickers):,} alphabetically sorted eligible symbols. "
+    "Raise the maximum ticker count to broaden coverage."
+)
             details.append("No consensus price target returned")
     except Exception as exc:
         details.append(f"Price-target request: {type(exc).__name__}: {str(exc)[:100]}")
