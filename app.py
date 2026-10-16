@@ -312,9 +312,8 @@ if run:
             st.download_button("Download CSV", out.to_csv(index=False).encode(), "sma150_breakouts.csv", "text/csv")
         if errors:
             with st.expander(f"Price-data warnings ({len(errors)})"):
-sting size.")
-        else:
-            tickers = get_index_members(universe)[:limit]
+                for error in errors:
+                    st.write(error)
         if not tickers:
             st.error("No valid tickers found.")
             st.stop()
